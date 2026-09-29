@@ -42,7 +42,7 @@ No uses el Consumer Secret.
 
 ## 3. Ejecutar
 
-Por defecto descarga eventos de música en España:
+Por defecto descarga los eventos de música publicados en España para los próximos dos años:
 
 ```bash
 python ticketmaster_to_csv.py
@@ -80,8 +80,17 @@ python ticketmaster_to_csv.py   --start-date 2026-09-01   --end-date 2026-12-31 
 
 El script solicita 100 eventos por página: las peticiones de 500 provocaban un error HTTP 400.
 Ticketmaster limita el deep paging a los primeros 1000 resultados de una consulta.
-Si hay más resultados, el script guarda los recuperados y avisa de que el CSV puede ser parcial.
-Usa intervalos de fechas más pequeños y un nombre de salida distinto para cada intervalo.
+El script divide automáticamente el periodo en intervalos más pequeños cuando una consulta
+supera ese límite. Descarga las páginas de cada intervalo y reúne los resultados en un único
+CSV, eliminando duplicados. No hay un tope global de 1000 eventos.
+Si más de 1000 eventos coinciden en el mismo segundo, se detiene con un error en lugar de
+guardar un resultado truncado.
+
+Sin opciones de fecha se consulta desde hoy hasta el mismo día de dentro de dos años.
+Puedes cambiar el periodo con `--start-date` y `--end-date`.
+Solo se incluyen conciertos con fecha definida; los eventos TBA/TBD quedan excluidos.
+La cantidad final depende de los eventos que Ticketmaster tenga publicados en ese momento;
+una fecha final más lejana no garantiza más resultados.
 Las fechas de los filtros se interpretan en UTC, desde las 00:00:00 hasta las 23:59:59.
 
 Referencia: [Discovery API de Ticketmaster](https://developer.ticketmaster.com/products-and-docs/apis/discovery-api/v2/).

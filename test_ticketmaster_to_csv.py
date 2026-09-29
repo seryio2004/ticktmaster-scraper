@@ -4,6 +4,7 @@ import io
 import tempfile
 import unittest
 from pathlib import Path
+from datetime import datetime, timedelta, timezone
 from unittest.mock import Mock, patch
 
 import requests
@@ -12,6 +13,9 @@ import ticketmaster_to_csv as tm
 
 class TicketmasterTests(unittest.TestCase):
     def setUp(self):
+        sleep = patch.object(tm.time, "sleep")
+        sleep.start()
+        self.addCleanup(sleep.stop)
         self.stdout = contextlib.redirect_stdout(io.StringIO())
         self.stdout.__enter__()
         self.addCleanup(self.stdout.__exit__, None, None, None)
@@ -63,17 +67,61 @@ class TicketmasterTests(unittest.TestCase):
         self.assertEqual(calls[0]['endDateTime'], '2026-10-31T23:59:59Z')
 
     @patch.object(tm.requests, 'Session')
-    def test_deep_paging_limit(self, session_class):
+    def test_split_downloads_over_1000_events_including_boundaries(self, session_class):
         session = session_class.return_value.__enter__.return_value
-        session.get.return_value = self.response({
-            '_embedded': {'events': [{'id': str(i)} for i in range(100)]},
-            'page': {'totalPages': 11, 'totalElements': 1100},
+        start = datetime(2026, 10, 1)
+        offsets = [i * 120 for i in range(1100)] + [86399, 172799]
+        events = [
+            {'id': str(i), 'dates': {'start': {
+                'dateTime': (start + timedelta(seconds=offset)).strftime('%Y-%m-%dT%H:%M:%SZ'),
+            }}}
+            for i, offset in enumerate(offsets)
+        ]
+        calls = []
+        def get(url, params, timeout):
+            calls.append(dict(params))
+            matching = [event for event in events if
+                        params['startDateTime'] <= event['dates']['start']['dateTime'] <= params['endDateTime']]
+            offset = params['page'] * params['size']
+            self.assertLess(offset, 1000)
+            return self.response({
+                '_embedded': {'events': matching[offset:offset + params['size']]},
+                'page': {'totalElements': len(matching), 'totalPages': (len(matching) + 99) // 100},
+            })
+        session.get.side_effect = get
+        rows = tm.download_events('secret', 'ES', 'music', '2026-10-01', '2026-10-02')
+        self.assertEqual(len(rows), 1102)
+        self.assertEqual({row['event_id'] for row in rows}, {event['id'] for event in events})
+        self.assertGreater(len({(c['startDateTime'], c['endDateTime']) for c in calls}), 1)
+        self.assertTrue(all(c['includeTBA'] == 'no' and c['includeTBD'] == 'no' for c in calls))
+
+    @patch.object(tm.requests, 'Session')
+    def test_exactly_1000_does_not_split(self, session_class):
+        session = session_class.return_value.__enter__.return_value
+        session.get.side_effect = lambda url, params, timeout: self.response({
+            '_embedded': {'events': [{'id': str(params['page'] * 100 + i)} for i in range(100)]},
+            'page': {'totalPages': 10, 'totalElements': 1000},
         })
-        with contextlib.redirect_stderr(io.StringIO()) as err:
-            rows = tm.download_events('secret', 'ES', 'music')
+        rows = tm.download_events('secret', 'ES', 'music')
         self.assertEqual(len(rows), 1000)
         self.assertEqual(session.get.call_count, 10)
-        self.assertIn('parcial', err.getvalue())
+
+    @patch.object(tm.requests, 'Session')
+    def test_unsplittable_interval_fails_instead_of_truncating(self, session_class):
+        session = session_class.return_value.__enter__.return_value
+        session.get.return_value = self.response({'page': {'totalPages': 11, 'totalElements': 1100}})
+        with self.assertRaisesRegex(RuntimeError, 'mismo segundo'):
+            tm.download_events('secret', 'ES', 'music', '2026-10-01', '2026-10-01')
+        self.assertLess(session.get.call_count, 20)
+
+    def test_default_date_range_and_leap_day(self):
+        start, end = tm.resolve_date_range('2026-09-29')
+        self.assertEqual(start, datetime(2026, 9, 29))
+        self.assertEqual(end, datetime(2028, 9, 29, 23, 59, 59))
+        start, end = tm.resolve_date_range('2028-02-29')
+        self.assertEqual(end, datetime(2030, 2, 28, 23, 59, 59))
+        start, _ = tm.resolve_date_range()
+        self.assertEqual(start.date(), datetime.now(timezone.utc).date())
 
     @patch.object(tm.requests, 'Session')
     def test_errors_do_not_expose_api_key(self, session_class):
